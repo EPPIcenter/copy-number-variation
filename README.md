@@ -49,13 +49,13 @@ This is a repo to compile and harmonizr various versions of CNV code that was or
     * Fold change outputs for each gene 
 
 **Yos**
-    * Took the one on github that Andres had adapted to take v0.1.8 outputs 
-    * Made R script callable on command line 
-    * Unsure what parasitemia is being used for 
-    * Can change thresholds and set outputs on command line 
+* Took the one on github that Andres had adapted to take v0.1.8 outputs 
+* Made R script callable on command line 
+* Unsure what parasitemia is being used for 
+* Can change thresholds and set outputs on command line 
 
 **If people don’t have controls**
-    * Assume majority of samples have no CNV and use the median of the data for normalisation 
-    * This code is not in repo - Jessica and Andres have that 
-    * This should be added as a feature 
-    * This was found to work better (comments on slack from Bryan though in immrse channel)
+* Assume majority of samples have no CNV and use the median of the data for normalisation 
+* This code is not in repo - Jessica and Andres have that 
+* This should be added as a feature 
+* This was found to work better (comments on slack from Bryan though in immrse channel)
