@@ -5,7 +5,7 @@ This repository estimates copy number variation (CNV) from [mad4hatter](https://
 ## Prerequisites
 
 1. **mad4hatter results** — Process your sequencing data with mad4hatter first. You need one or more run directories, each containing `allele_data.txt`.
-2. **R and Quarto** — Install [R](https://cran.r-project.org/).
+2. **R** — Install [R](https://cran.r-project.org/).
 3. **R packages** — Install the packages loaded at the top of `estCNV.qmd`:
    - `tidyverse`
    - `mgcv`
