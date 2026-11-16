@@ -26,25 +26,40 @@ The following variables need to be set by the user
 # Indicate path to allele data files. Currently needs to be the path to the directory where all results are stored
 # i.e., within this path there are bioinformatic pipeline directories 
 allele.data.path = "/path/to/mad4hatter/outputs/"
-
 # Indicate path to manifest indicating library preparation SuperBatches, Batches and controls. 
-# Required columns are sample_name (string), CNVControl (TRUE/FALSE), Batch (numbers), SuperBatch (numbers), Run (string)
-    # sample_name: ID for sample. It is okay if these are replicated across batches 
-    # CNVControl: controls known NOT to have a CNV
+# Required columns are sample_name (string), CNVControl (Sample/Positive/Negative), Batch (numbers), SuperBatch (numbers), Run (string)
+    # sample_name: ID for sample. It is okay if these are replicated across batches. The column can also be
+    #              called sampleID, SampleID or sample_id (in manifest and allele tables); it is renamed to sample_name
+    # CNVControl: one of the following (case-insensitive, e.g. Positive or positive)
+    #      Sample: samples to estimate CNVs
+    #      Positive: controls known to have a CNV (Dd2, HB3, PM2, PM4). Always excluded from the median fold change
+    #      Negative: controls known NOT to have a CNV (3D7). Used for the median fold change
     # Batch: a group of samples prepped together
     # SuperBatch: a group of Batches where the controls (and samples) look reasonably similar
-    # Run : an ID for the sequencing run. This should match the folder name containing the mad4hatter pipeline results
+    # Run : an ID for the sequencing run. This should match the folder name containing the mad4hatter pipeline results,
+    #       or the Run column of the allele table if it has one
 # Note that controls/samples within a SuperBatch will be averaged and used to correct samples within that SuperBatch
 manifest.path = "path/to/manifest.csv"
+
 
 # Path to panel information and list of validated targets to include
 panel.info.dir = "panel_information/"
 validated.target.filter.path = "panel_information/validated_target_filter.tsv"
+# Targets of interest for all pools (columns target_name, group). Targets in the same group (e.g. CRT) are estimated together.
+# target_name can also be in the older format (amplicon coordinates plus pool suffix, e.g. Pf3D7_07_v3-403479-403716-1B)
+target.of.interest.path = "panel_information/validated_target_filter.tsv"
+
+# Older mad4hatter allele tables (sampleID, locus, asv, reads, ...) name loci by amplicon coordinates (primers included)
+# plus a pool suffix, e.g. Pf3D7_08_v3-585331-585590-1A. They are converted to target_name using panel.info.dir,
+# and to pool using this map. Combined suffixes are split: 1AB -> 1A + 1B, 1B2 -> 1B + 2
+old.format.pool.map = c("1A" = "D1.1", "1B" = "R1.2", "2" = "R2.1")
 
 
-# If TRUE, trims extra sequencing-related information from sample_name in allele table to match the manifest format
+# If TRUE, trims sequencing extensions ("_S<number>..." or "_L00<number>") from sample_name in allele table to match
+# the manifest format. Names without them are not modified
 standardise_sample_name = TRUE
-# If True, median of only controls will be used. If False, median of all samples and controls will be used
+# If True, median of only Negative controls will be used. If False, median of all Samples and Negative controls will be used
+# Positive controls are never used for the median
 use.controls.only = FALSE
 ```
 
@@ -59,6 +74,24 @@ target.read.threshold = 50 # min reads per locus
 ntarget.proportion.threshold = 0.8 # proportion of amplicons with at least target.read.threshold reads
 ```
 
+
+Standardising the sample ID column name
+```{r}
+# Accept different names for the sample ID column (case-insensitive) and rename it to sample_name,
+# which is the name used in the rest of the analysis
+sample.name.aliases = c("sample_name", "sampleid", "sample_id")
+
+standardise_sample_column <- function(data, source) {
+  sample_col <- colnames(data)[tolower(colnames(data)) %in% sample.name.aliases]
+  if (length(sample_col) == 0) {
+    stop(source, " has no sample ID column. Expected one of: sample_name, sampleID, SampleID, sample_id")
+  }
+  if (length(sample_col) > 1) {
+    stop(source, " has more than one sample ID column: ", paste(sample_col, collapse = ", "))
+  }
+  rename(data, sample_name = all_of(sample_col))
+}
+```
 
 Reading manifest
 ```{r}
@@ -78,6 +111,8 @@ if (grepl("\\.csv$", manifest.path, ignore.case = TRUE)) {
 } else {
   stop("Manifest should be either a csv, tsv, or xlsx file")
 }
+
+manifest <- standardise_sample_column(manifest, "Manifest")
 
 #--------------------------------------------------
 # Validate required columns
@@ -118,15 +153,20 @@ if (
 
 manifest$sample_name <- as.character(manifest$sample_name)
 
-# CNVControl must be TRUE/FALSE
-valid_cnv <- manifest$CNVControl %in% c(TRUE, FALSE)
+# Run is matched to allele table folder names (text), so read it as text even if the manifest uses numbers
+manifest$Run <- as.character(manifest$Run)
 
-if (any(is.na(valid_cnv) | !valid_cnv)) {
+# CNVControl must be Sample, Positive or Negative (any case, e.g. positive or POSITIVE)
+manifest$CNVControl <- str_to_title(trimws(as.character(manifest$CNVControl)))
+valid_cnv <- manifest$CNVControl %in% c("Sample", "Positive", "Negative")
 
-  stop("CNVControl must contain only TRUE or FALSE values")
+if (!all(valid_cnv)) {
+
+  stop("CNVControl must contain only Sample, Positive or Negative values. Found: ",
+       paste(unique(manifest$CNVControl[!valid_cnv]), collapse = ", "))
 }
 
-manifest$CNVControl <- as.logical(manifest$CNVControl)
+manifest$CNVControl <- factor(manifest$CNVControl, levels = c("Sample", "Negative", "Positive"))
 
 # Batch must not be missing 
 if (
@@ -151,13 +191,18 @@ manifest <- manifest %>% select("sample_name","Batch","CNVControl","SuperBatch",
 
 Processing allele tables and finding unique pools
 ```{r}
-# Find allele tables
+# Find allele tables: any file whose name starts with allele_data or allele_table
 files <- list.files(
   path = allele.data.path,
-  pattern = "allele_data.txt",
+  pattern = "^allele_(data|table)",
   recursive = TRUE,
   full.names = TRUE
 )
+
+if (length(files) == 0) {
+  stop("No allele_data* or allele_table* files found in ", allele.data.path)
+}
+cat("Allele tables found:\n", paste0(files, "\n"))
 
 required_columns <- c(
   "sample_name",
@@ -166,9 +211,47 @@ required_columns <- c(
   "pool"
 )
 
+# Lookup from amplicon coordinates (as used in older loci names) to target_name
+amplicon.lookup <- list.files(panel.info.dir, pattern = "_amplicon_info\\.tsv$", recursive = TRUE, full.names = TRUE) %>%
+  map_df(read.delim) %>%
+  transmute(amplicon = paste(chrom, insert_start - nchar(fwd_primer) + 1, insert_end + nchar(rev_primer), sep = "-"),
+            target_name) %>%
+  distinct()
+
+# Convert older mad4hatter format (locus = <chrom>-<start>-<end>-<pool suffix>) to target_name and pool
+convert_old_format <- function(data, source) {
+  suffixes <- unique(sub("^.*-", "", data$locus))
+  suffix.pools <- map_chr(suffixes, function(suffix) {
+    parts <- str_match_all(suffix, "(\\d)([A-Z]*)")[[1]]
+    codes <- unlist(map2(parts[, 2], parts[, 3], function(n, letters) {
+      if (letters == "") n else paste0(n, strsplit(letters, "")[[1]])
+    }))
+    if (paste(parts[, 1], collapse = "") != suffix || !all(codes %in% names(old.format.pool.map))) {
+      stop(source, ": unknown pool suffix '", suffix, "'. Add it to old.format.pool.map")
+    }
+    paste(sort(unique(old.format.pool.map[codes])), collapse = ",")
+  })
+
+  data <- data %>%
+    mutate(target_name = amplicon.lookup$target_name[match(sub("-[^-]+$", "", locus), amplicon.lookup$amplicon)],
+           pool = suffix.pools[match(sub("^.*-", "", locus), suffixes)])
+
+  unmapped <- unique(data$locus[is.na(data$target_name)])
+  if (length(unmapped) > 0) {
+    warning(source, ": ", length(unmapped), " loci not found in ", panel.info.dir, " and removed: ",
+            paste(head(unmapped, 5), collapse = ", "), if (length(unmapped) > 5) ", ...")
+  }
+  cat(source, ": older format, ", n_distinct(data$locus) - length(unmapped), " loci converted to target_name\n", sep = "")
+  filter(data, !is.na(target_name))
+}
+
 # Function to read file and add metadata
 read_and_add_filename <- function(file, required_columns) {
-  data <- read.delim(file)
+  data <- if (grepl("\\.csv$", file, ignore.case = TRUE)) read.csv(file) else read.delim(file)
+  data <- standardise_sample_column(data, paste0("allele data for ", basename(dirname(file))))
+  if ("locus" %in% colnames(data) && !"target_name" %in% colnames(data)) {
+    data <- convert_old_format(data, paste0("allele data for ", basename(dirname(file))))
+  }
 
   missing_columns <- setdiff(required_columns, colnames(data))
   if (length(missing_columns) > 0) {
@@ -181,7 +264,8 @@ read_and_add_filename <- function(file, required_columns) {
     }
     
   data$filename <- file
-  data$Run <- basename(dirname(file))
+  # Keep the table's own Run column (e.g. merged tables with several runs), otherwise use the folder name
+  if (!"Run" %in% colnames(data)) data$Run <- basename(dirname(file))
 
   return(data)
 }
@@ -189,11 +273,12 @@ read_and_add_filename <- function(file, required_columns) {
 # Read all files
 allele.data <- map_df(files, read_and_add_filename, required_columns = required_columns)
 
-# Trim sample name extensions if set
+# Trim sequencing extensions if set: "_S<number>" and everything after it, or a trailing "_L00<number>"
+# (N2039081_5_S42_L001 -> N2039081_5); names without them are not modified
 allele.data <- allele.data %>%
   mutate(sample_name = if (standardise_sample_name) sample_name %>%
-           sub("_L001$", "", .) %>%
-           word(., start = 1, end = -2, sep = "_") else sample_name)
+           sub("_S\\d+(_.*)?$", "", .) %>%
+           sub("_L00\\d+$", "", .) else sample_name)
 ```
 
 Find pools from allele tables
@@ -286,31 +371,30 @@ amplicon.info <- amplicon.info %>%
 
 Loading targets of interest
 ```{r}
-# Put together targets of interest based on pools
-cat('Targets of Interest Files\n')
-target.of.interest <- map_df(unique_pools, function(pool_name) {
-    
-  file_path <- file.path(panel.info.dir, pool_name, paste0(pool_name, "_target_of_interest.tsv"))
-  cat(paste0(file_path, '\n'))
+# Load targets of interest. Older format names are converted to target_name using amplicon.lookup
+cat('Targets of Interest File\n', target.of.interest.path, '\n')
+target.of.interest <- read_tsv(target.of.interest.path, show_col_types = FALSE) %>%
+  mutate(listed_name = target_name,
+         target_name = ifelse(target_name %in% amplicon.lookup$target_name, target_name,
+                              amplicon.lookup$target_name[match(sub("-[^-]+$", "", target_name), amplicon.lookup$amplicon)]))
 
-  if (!file.exists(file_path)) {
-    stop("Missing target of interest file for pool: ", pool_name)
-  }
+unmapped <- filter(target.of.interest, is.na(target_name))$listed_name
+if (length(unmapped) > 0) {
+  warning("Targets of interest not found in ", panel.info.dir, " and removed: ", paste(unmapped, collapse = ", "))
+}
 
-  data <- read.delim(file_path,stringsAsFactors = FALSE)
+# Keep targets in the pools of this analysis (one row per target, even if listed with old and new names) and add their pool
+target.of.interest <- target.of.interest %>%
+  filter(!is.na(target_name)) %>%
+  distinct(target_name, group) %>%
+  inner_join(amplicon.info %>% select(target_name, pool), by = "target_name")
 
-  # Handle empty files
-  if (nrow(data) == 0) {
-    data <- tibble(
-      target_name = character(),
-      pool = character()
-    )
-  } else {
-    data$pool <- pool_name
-  }
+multi.group.targets <- target.of.interest %>% count(target_name) %>% filter(n > 1)
+if (nrow(multi.group.targets) > 0) {
+  stop("Targets of interest listed in more than one group: ", paste(multi.group.targets$target_name, collapse = ", "))
+}
 
-  return(data)
-})
+target.of.interest %>% count(group, name = "n_targets")
 ```
 
 Loading target filter
@@ -334,7 +418,7 @@ target.counts <- allele.data.clean %>%
   # Get reads per target 
   group_by(sample_name, filename, Run, target_name) %>%
   summarise(reads = sum(reads, na.rm = TRUE), .groups = "drop") %>%
-  complete(sample_name, filename, Run, target_name = target.filter, fill = list(reads = 0)) %>%
+  complete(nesting(sample_name, filename, Run), target_name = target.filter, fill = list(reads = 0)) %>%
 
   # Add pool column 
   left_join(amplicon.info %>% select('target_name','pool'), by = "target_name") %>%
@@ -416,13 +500,15 @@ target.counts.filtered <- target.counts %>%
 ```
 
 ```{r}
-# Generate plot with total number of reads and number of amplicons with at least 10 reads
+# Generate plot with total number of reads and number of amplicons with more than target.read.threshold reads
 # Colors are taken from manifest
 plots = list()
+# Samples can be sequenced in more than one run, so QC status is per sample and Run
+qc.pass.ids = paste(samples.filtered$sample_name, samples.filtered$Run)
 plots[[1]] = ggplot(target.counts %>%
-                      select(sample_name,reaction,total_sample_reads,n_passed_targets,CNVControl) %>% 
-                      distinct() %>% 
-                      mutate(qc_pass= sample_name %in% samples.filtered$sample_name))+
+                      select(sample_name,Run,reaction,total_sample_reads,n_passed_targets,CNVControl) %>%
+                      distinct() %>%
+                      mutate(qc_pass= paste(sample_name,Run) %in% qc.pass.ids))+
   geom_point(aes(x = total_sample_reads,y=n_passed_targets,
                  color = qc_pass,
                  fill = CNVControl),
@@ -433,12 +519,12 @@ plots[[1]] = ggplot(target.counts %>%
   scale_color_manual(values=c("grey","black"))+
   theme(aspect.ratio = 1)+
   xlab("Total reads per sample")+
-  ylab("Number of amplicons with > 10 reads")
+  ylab(paste("Number of amplicons with >", target.read.threshold, "reads"))
 
 plots[[2]] = ggplot(target.counts %>%
-                      select(sample_name,reaction,reaction_reads,CNVControl) %>% 
-                      distinct() %>% 
-                      mutate(qc_pass= sample_name %in% samples.filtered$sample_name) %>% 
+                      select(sample_name,Run,reaction,reaction_reads,CNVControl) %>%
+                      distinct() %>%
+                      mutate(qc_pass= paste(sample_name,Run) %in% qc.pass.ids) %>%
                       pivot_wider(names_from = reaction,values_from = reaction_reads) %>% 
                       rename(Reaction1 = "1",Reaction2 = "2"))+
   geom_point(aes(x = Reaction1,y=Reaction2,
@@ -456,31 +542,29 @@ plots[[2]] = ggplot(target.counts %>%
   ylab("Reads in reaction 2")
 
 
-grid.arrange(grobs = plots, nrow = 2,ncol=1)
+# Samples with 0 reads give "log-10 transformation introduced infinite values" warnings; they are drawn at the axis edge
+suppressWarnings(grid.arrange(grobs = plots, nrow = 2,ncol=1))
 ```
 
 ```{r}
 # Summary of number of samples per batch and class
-summary = target.counts.filtered %>% 
-  group_by(SuperBatch,CNVControl) %>% 
-  summarise(n = n_distinct(sample_name)) %>% 
-  mutate(CNVControl = ifelse(CNVControl, "# CNV controls","# non-CNV controls")) %>% 
-  pivot_wider(names_from = CNVControl,values_from = n,values_fill = 0)
+summary = target.counts.filtered %>%
+  filter(!is.na(CNVControl)) %>%
+  group_by(SuperBatch,CNVControl) %>%
+  summarise(n = n_distinct(sample_name),.groups = 'drop') %>%
+  pivot_wider(names_from = CNVControl,values_from = n,values_fill = 0,names_expand = TRUE) %>%
+  rename(`# samples` = Sample,`# negative controls` = Negative,`# positive controls` = Positive)
 
 # Display the summary
 summary  %>%
-  kableExtra::kable() %>% 
+  kableExtra::kable() %>%
   kableExtra::kable_styling(bootstrap_options = c("striped", "condensed"))
 
-if(nrow(summary %>%
-        group_by(SuperBatch) %>% 
-        mutate(`Control-TRUE`=sum(`# CNV controls`)) %>% 
-        filter(`Control-TRUE`==0))){
-  paste("SuperBatch(s) with no CNV controls:",
-        paste((summary %>%
-                 group_by(SuperBatch) %>% 
-                 mutate(`# CNV controls`=sum(`# CNV controls`)) %>% 
-                 filter(`# CNV controls`==0))$SuperBatch,collapse=" "),
+# Negative controls are needed for the median when use.controls.only = TRUE
+no.negative.controls = summary$SuperBatch[summary$`# negative controls` == 0]
+if(length(no.negative.controls) > 0){
+  paste("SuperBatch(s) with no negative controls:",
+        paste(no.negative.controls,collapse=" "),
         ". Consider reassigning."
   )
 }
@@ -609,9 +693,9 @@ Plotting fold changes for controls
 ```{r}
 # Initialize with empty list for plots and tibble for prediction data
 plot.controls = list()
-# Get list of controls (taken from manifest)
-controls = samples.filtered %>% 
-  filter(CNVControl) %>% 
+# Get list of Positive and Negative controls (taken from manifest)
+controls = samples.filtered %>%
+  filter(CNVControl %in% c("Positive","Negative")) %>%
   select(sample_name,Run)
 
 
@@ -660,14 +744,28 @@ if( use.controls.only ){
 data.prediction = data.prediction %>% 
   left_join(manifest,by = join_by(sample_name,Run))
 # Display all plots
-grid.arrange(grobs = plot.controls, nrow = length(plot.controls))
+#grid.arrange(grobs = plot.controls, nrow = length(plot.controls))
+
+# Save plots to pdf, 4 controls per page
+plot.controls.file = file.path(allele.data.path, "Plot_FoldChange_Controls.pdf")
+ggsave(plot.controls.file, marrangeGrob(plot.controls, nrow = 4, ncol = 1, top = NULL), width = 8.5, height = 11)
+cat(" Plots Fold Change for Controls saved as:", plot.controls.file, "\n")
 ```
 
 Getting median fold changes for controls
 ```{r}
+# Positive controls (CNVControl = Positive in manifest, e.g. Dd2, HB3, PM2, PM4) are excluded from the median,
+# so it comes from Negative controls only (use.controls.only = TRUE) or from Samples and Negative controls (FALSE)
+data.prediction = data.prediction %>%
+  mutate(ExcludedFromMedian = CNVControl %in% "Positive")
+excluded.samples = unique(filter(data.prediction, ExcludedFromMedian)$sample_name)
+cat(" Positive controls excluded from median:",
+    ifelse(length(excluded.samples) > 0, paste(excluded.samples, collapse = " "), "none"), "\n")
+
 # Get median fold change for each target across controls in a SuperBatch
-data.prediction.median = data.prediction %>% 
-  group_by(target_name,SuperBatch,group) %>% 
+data.prediction.median = data.prediction %>%
+  filter(!ExcludedFromMedian) %>%
+  group_by(target_name,SuperBatch,group) %>%
   summarize(MedianFoldChange = median(FoldChange),.groups = 'drop') %>% 
   mutate(Locus.Group = paste(group,target_name))
 
@@ -727,7 +825,7 @@ plots[[1]] =ggplot(fold.changes %>%
 plots[[2]] =ggplot(fold.changes)+
   geom_histogram(aes(x=FoldChangeGroup))+
   facet_wrap(~group)
-grid.arrange(grobs = plots, nrow = 2,ncol=1)
+suppressWarnings(grid.arrange(grobs = plots, nrow = 2,ncol=1))
 ```
 
 ```{r}
@@ -762,5 +860,12 @@ grid.arrange(grobs = plots, nrow = 2,ncol=1)
 ```{r}
 write.csv(fold.changes,file.path(allele.data.path,"fold_changes_output.csv"))
 write.csv(fold.changes.final,file.path(allele.data.path,"fold_changes_final_output.csv"))
+# Reads per target of each sample and Run used for the fold changes (reads: after the SuperBatch correction;
+# Reads.Uncorrected: before it), with pool, amplicon length and group. Used by estCNV_PostAnalysis.qmd for the
+# GAM plots of the samples in CNV_Outlier_Summary.txt
+write.csv(target.counts.filtered.corrected %>%
+            select(sample_name, Run, Batch, SuperBatch, CNVControl, target_name, pool, amplicon_length, group,
+                   Reads.Uncorrected, Correction.Factor, reads),
+          file.path(allele.data.path, "target_counts_corrected.csv"), row.names = FALSE)
 ```
 
