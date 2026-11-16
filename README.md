@@ -48,7 +48,7 @@ Required columns:
 | Column        | Description |
 |---------------|-------------|
 | `sample_name` | Sample ID. May be repeated across batches. Must match `allele_data.txt` after optional name standardisation. |
-| `CNVControl`  | `TRUE` if the sample is a control known **not** to have a CNV; otherwise `FALSE`. |
+| `CNVControl`  | `Negative` if the sample is a control known **not** to have a CNV (3D7); `Positive` if the sample is a control known to have a CNV (Dd2, HB3, PM2 and PM4); `Sample` field sample to evaluate CNV. |
 | `Batch`       | Library preparation batch. Samples prepped together share a batch. |
 | `SuperBatch`  | Group of batches where controls and samples are comparable. Correction factors are calculated per SuperBatch. |
 | `Run`         | Sequencing run ID. Must match the mad4hatter output folder name containing that sample's `allele_data.txt`. |
